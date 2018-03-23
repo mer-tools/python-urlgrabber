@@ -837,6 +837,7 @@ class URLGrabberOptions:
         self.data = None
         self.urlparser = URLParser()
         self.quote = None
+        self.netrc = True # use ~/.netrc with libcurl
         self.ssl_ca_cert = None # sets SSL_CAINFO - path to certdb
         self.ssl_context = None # no-op in pycurl
         self.ssl_verify_peer = True # check peer's cert for authenticityb
@@ -1256,6 +1257,8 @@ class PyCurlFileObject():
                 opts.proxy_factory = None
 
         # FIXME username/password/auth settings
+        if opts.netrc:
+            self.curl_obj.setopt(pycurl.NETRC, pycurl.NETRC_OPTIONAL )
 
         #posts - simple - expects the fields as they are
         if opts.data:
