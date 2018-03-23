@@ -143,8 +143,17 @@ GENERAL ARGUMENTS (kwargs)
     note that proxy authentication information may be provided using
     normal URL constructs:
       proxies={ 'http' : 'http://user:host@foo:3128' }
-    Lastly, if proxies is None, the default environment settings will
-    be used.
+    If proxies is None, the proxy_factory (described below) will be used.
+
+  proxy_factory = libproxy.ProxyFactory()
+
+    a libproxy ProxyFactory object. This is initialised to a default
+    global ProxyFactory if libproxy is installed, but can be
+    overridden to None to disable libproxy, or indeed to anything with
+    a getProxies() method that takes a URL and returns a list of
+    potential proxies. The proxy_factory is is only used if the
+    proxies dictionary is not set. If both proxies and proxy_factory
+    are None, the default environment variable will be used.
 
   prefix = None
 
@@ -438,6 +447,18 @@ try:
     exec('from ' + (__name__.split('.'))[0] + ' import __version__')
 except:
     __version__ = '???'
+
+try:
+    # this part isn't going to do much - need to talk to gettext
+    from i18n import _
+except ImportError, msg:
+    def _(st): return st
+    
+try:
+    import libproxy
+    _grabber_proxy_factory = libproxy.ProxyFactory()
+except:
+    _grabber_proxy_factory = None
 
 ########################################################################
 # functions for debugging output.  These functions are here because they
@@ -802,6 +823,7 @@ class URLGrabberOptions:
         self.user_agent = 'urlgrabber/%s' % __version__
         self.keepalive = 1
         self.proxies = None
+        self.proxy_factory = _grabber_proxy_factory
         self.reget = None
         self.failure_callback = None
         self.interrupt_callback = None
@@ -815,6 +837,7 @@ class URLGrabberOptions:
         self.data = None
         self.urlparser = URLParser()
         self.quote = None
+        self.netrc = True # use ~/.netrc with libcurl
         self.ssl_ca_cert = None # sets SSL_CAINFO - path to certdb
         self.ssl_context = None # no-op in pycurl
         self.ssl_verify_peer = True # check peer's cert for authenticityb
@@ -1052,7 +1075,8 @@ class PyCurlFileObject():
         self._reget_length = 0
         self._prog_running = False
         self._error = (None, None)
-        self.size = None
+        self.size = 0
+        self._hdr_ended = False
         self._do_open()
         
         
@@ -1085,9 +1109,14 @@ class PyCurlFileObject():
             return -1
             
     def _hdr_retrieve(self, buf):
+        if self._hdr_ended:
+            self._hdr_dump = ''
+            self.size = 0
+            self._hdr_ended = False
+
         if self._over_max_size(cur=len(self._hdr_dump), 
                                max_size=self.opts.max_header_size):
-            return -1            
+            return -1
         try:
             self._hdr_dump += buf
             # we have to get the size before we do the progress obj start
@@ -1104,7 +1133,17 @@ class PyCurlFileObject():
                     s = parse150(buf)
                 if s:
                     self.size = int(s)
-            
+                    
+            if buf.lower().find('location') != -1:
+                location = ':'.join(buf.split(':')[1:])
+                location = location.strip()
+                self.scheme = urlparse.urlsplit(location)[0]
+                self.url = location
+                
+            if len(self._hdr_dump) != 0 and buf == '\r\n':
+                self._hdr_ended = True
+                if DEBUG: DEBUG.info('header ended:')
+                
             return len(buf)
         except KeyboardInterrupt:
             return pycurl.READFUNC_ABORT
@@ -1136,6 +1175,7 @@ class PyCurlFileObject():
         self.curl_obj.setopt(pycurl.PROGRESSFUNCTION, self._progress_update)
         self.curl_obj.setopt(pycurl.FAILONERROR, True)
         self.curl_obj.setopt(pycurl.OPT_FILETIME, True)
+        self.curl_obj.setopt(pycurl.FOLLOWLOCATION, True)
         
         if DEBUG:
             self.curl_obj.setopt(pycurl.VERBOSE, True)
@@ -1202,8 +1242,23 @@ class PyCurlFileObject():
                     else:
                         if proxy == '_none_': proxy = ""
                         self.curl_obj.setopt(pycurl.PROXY, proxy)
-            
+        elif opts.proxy_factory:
+            try:
+                proxies = opts.proxy_factory.getProxies(self.url);
+                for proxy in proxies:
+                    if proxy.startswith('http://'):
+                        if DEBUG: DEBUG.info('using proxy "%s" for url %s' % \
+                                                 (proxy, self.url))
+                        self.curl_obj.setopt(pycurl.PROXY, proxy)
+                        break
+            except:
+                # libproxy may fail, and in that case we just fall
+                # back to next proxy supplier (environment variables)
+                opts.proxy_factory = None
+
         # FIXME username/password/auth settings
+        if opts.netrc:
+            self.curl_obj.setopt(pycurl.NETRC, pycurl.NETRC_OPTIONAL )
 
         #posts - simple - expects the fields as they are
         if opts.data:
@@ -1291,7 +1346,12 @@ class PyCurlFileObject():
                 raise err
                     
             elif str(e.args[1]) == '' and self.http_code != 0: # fake it until you make it
-                msg = 'HTTP Error %s : %s ' % (self.http_code, self.url)
+                if self.scheme in ['http', 'https']:
+                    msg = 'HTTP Error %s : %s ' % (self.http_code, self.url)
+                elif self.scheme in ['ftp']:
+                    msg = 'FTP Error %s : %s ' % (self.http_code, self.url)
+                else:
+                    msg = "Unknown Error: URL=%s , scheme=%s" % (self.url, self.scheme)
             else:
                 msg = 'PYCURL ERROR %s - "%s"' % (errcode, str(e.args[1]))
                 code = errcode
@@ -1299,6 +1359,12 @@ class PyCurlFileObject():
             err.code = code
             err.exception = e
             raise err
+        else:
+            if self._error[1]:
+                msg = self._error[1]
+                err = URLGRabError(14, msg)
+                err.url = self.url
+                raise err
 
     def _do_open(self):
         self.curl_obj = _curl_cache
@@ -1532,11 +1598,14 @@ class PyCurlFileObject():
     def _over_max_size(self, cur, max_size=None):
 
         if not max_size:
-            max_size = self.size
-        if self.opts.size: # if we set an opts size use that, no matter what
-            max_size = self.opts.size
+            if not self.opts.size:
+                max_size = self.size
+            else:
+                max_size = self.opts.size
+
         if not max_size: return False # if we have None for all of the Max then this is dumb
-        if cur > max_size + max_size*.10:
+
+        if cur > int(float(max_size) * 1.10):
 
             msg = _("Downloaded more than max size for %s: %s > %s") \
                         % (self.url, cur, max_size)
@@ -1582,7 +1651,11 @@ class PyCurlFileObject():
             self.opts.progress_obj.end(self._amount_read)
         self.fo.close()
         
-
+    def geturl(self):
+        """ Provide the geturl() method, used to be got from
+            urllib.addinfourl, via. urllib.URLopener.* """
+        return self.url
+        
 _curl_cache = pycurl.Curl() # make one and reuse it over and over and over
 
 

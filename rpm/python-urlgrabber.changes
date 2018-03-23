@@ -1,0 +1,21 @@
+* Sun Dec 9 2012 Islam Amer <islam.amer@jollamobile.com> - 3.9.1
+- Use netrc-optional with libcurl for easier image building in SDK
+
+* Fri Mar 11 2011 Yan Li <yan.i.li@intel.com> - 3.9.1
+- When libproxy fails, fall back to environment variables (BMC#13757)
+
+* Sat Jan 30 2010 Jian-feng Ding <jian-feng.ding@intel.com> - 3.9.1
+- Upgrade to 3.9.1 and enable spectacle
+  Dropped all old patches except David's libproxy one
+  Integreted the updated version of libproxy patch, found in:
+    https://bugzilla.redhat.com/show_bug.cgi?id=542224
+
+* Sat Dec 26 2009 David Woodhouse <David.Woodhouse@intel.com> - 3.1.0
+- Use libproxy to find proxy information
+
+* Sun Apr 12 2009 Peter Zhu <peter.j.zhu@intel.com> - 3.1.0
+- Add dependency to m2crypto so that it can works with https connection fixed bug #1289
+
+* Fri Feb 20 2009 Zhu Yanhai <yanhai.zhu@intel.com> - 3.1.0
+- Correct SOURCE
+- Version update to 3.1.0
